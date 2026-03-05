@@ -1,0 +1,542 @@
+# ================================================================================
+#  WordPress + MySQL on Minikube — MANUAL version (run line by line)
+#  All 6 fixes applied — see fix tags [FIX #N] inline
+# ================================================================================
+
+# Enable Hyper-V tools (if using Hyper-V driver)
+Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-Tools-All -All
+
+# Start Minikube (creates a local Kubernetes cluster)
+minikube start
+
+# Download kubectl binary for a specific Kubernetes release (example v1.35.0)
+curl.exe -LO "https://dl.k8s.io/release/v1.35.0/bin/windows/amd64/kubectl.exe"
+
+# Download the SHA256 checksum for the kubectl binary
+curl.exe -LO "https://dl.k8s.io/v1.35.0/bin/windows/amd64/kubectl.exe.sha256"
+
+# Verify the kubectl binary checksum using CertUtil
+CertUtil -hashfile kubectl.exe SHA256
+
+# Show the downloaded checksum file contents
+type kubectl.exe.sha256
+
+# Verify kubectl installation instructions reference (comment)
+## Kubectl installation
+## https://kubernetes.io/docs/tasks/tools/install-kubectl-windows/
+
+# Show kubectl client version
+kubectl version --client
+
+# Show cluster info (requires cluster running)
+kubectl cluster-info
+
+# Enable kubectl completion for PowerShell in current session
+kubectl completion powershell | Out-String | Invoke-Expression
+
+# Test kubectl via minikube's bundled kubectl (alternative)
+minikube kubectl -- get po -A
+
+# Optionally set an alias so kubectl maps to minikube kubectl
+Set-Alias -Name kubectl -Value "minikube kubectl --"
+
+# Remove the alias if you want to restore system kubectl
+Remove-Item Alias:kubectl -Force
+
+# List cluster nodes
+kubectl get nodes
+
+# List all pods across all namespaces
+kubectl get po -A
+
+# Create a Kubernetes secret for MySQL credentials using literals
+kubectl create secret generic mysql-secrets --from-literal=MYSQL_ROOT_PASSWORD=root-password --from-literal=MYSQL_PASSWORD=user-password
+
+# Create mysql-secret.yaml file content and write it to disk
+@"
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-secrets
+type: Opaque
+stringData:
+  MYSQL_ROOT_PASSWORD: root-password
+  MYSQL_PASSWORD: user-password
+"@ | Out-File -FilePath .\mysql-secret.yaml -Encoding utf8
+
+# Apply the mysql secret manifest to the cluster
+kubectl apply -f mysql-secret.yaml
+
+# List secrets in the current namespace
+kubectl get secrets
+
+# Describe the mysql secret to verify its contents (non-sensitive fields)
+kubectl describe secret mysql-secrets
+
+# Enable the Minikube ingress addon so an ingress controller is available
+minikube addons enable ingress
+
+# Show pods in the ingress-nginx namespace to verify controller pods
+kubectl get pods -n ingress-nginx
+
+# Create the k8s folder inside the user's profile directory
+mkdir "$env:USERPROFILE\k8s"
+
+# Change directory into the k8s folder
+cd "$env:USERPROFILE\k8s"
+
+# Create mysql-secret.yaml inside the k8s folder
+@"
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-secrets
+type: Opaque
+stringData:
+  MYSQL_ROOT_PASSWORD: root-password
+  MYSQL_PASSWORD: user-password
+"@ | Out-File -FilePath "$env:USERPROFILE\k8s\mysql-secret.yaml" -Encoding utf8
+
+# ================================================================================
+#  MYSQL PERSISTENT VOLUME + CLAIM
+#  Stores MySQL data at /data/mysql inside Minikube — survives pod restarts
+# ================================================================================
+
+@"
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: mysql-pv
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  hostPath:
+    path: "/data/mysql"
+"@ | Out-File -FilePath "$env:USERPROFILE\k8s\mysql-pv.yaml" -Encoding utf8
+
+kubectl apply -f "$env:USERPROFILE\k8s\mysql-pv.yaml"
+
+@"
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mysql-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: manual
+"@ | Out-File -FilePath "$env:USERPROFILE\k8s\mysql-pvc.yaml" -Encoding utf8
+
+kubectl apply -f "$env:USERPROFILE\k8s\mysql-pvc.yaml"
+
+# ================================================================================
+#  [FIX #1] WORDPRESS PERSISTENT VOLUME + CLAIM
+#  Without this, every pod restart wipes /var/www/html (themes, plugins, uploads,
+#  wp-config.php) causing WordPress to lose state and stop working.
+#  Stores WordPress files at /data/wordpress inside Minikube.
+# ================================================================================
+
+@"
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: wordpress-pv
+spec:
+  capacity:
+    storage: 2Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  hostPath:
+    path: "/data/wordpress"
+"@ | Out-File -FilePath "$env:USERPROFILE\k8s\wordpress-pv.yaml" -Encoding utf8
+
+kubectl apply -f "$env:USERPROFILE\k8s\wordpress-pv.yaml"
+
+@"
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: wordpress-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+  storageClassName: manual
+"@ | Out-File -FilePath "$env:USERPROFILE\k8s\wordpress-pvc.yaml" -Encoding utf8
+
+kubectl apply -f "$env:USERPROFILE\k8s\wordpress-pvc.yaml"
+
+# ================================================================================
+#  MYSQL DEPLOYMENT
+#  [FIX #2] livenessProbe added — restarts MySQL if it becomes unresponsive
+#  [FIX #3] resource limits added — prevents OOM kill by the kernel
+#  [FIX #4] readinessProbe no longer embeds password in the process list
+#           (removed -u root -p$MYSQL_ROOT_PASSWORD from mysqladmin ping)
+# ================================================================================
+
+@"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      containers:
+      - name: mysql
+        image: mysql:8.0
+        ports:
+        - containerPort: 3306
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secrets
+              key: MYSQL_ROOT_PASSWORD
+        - name: MYSQL_DATABASE
+          value: wordpress
+        - name: MYSQL_USER
+          value: wpuser
+        - name: MYSQL_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secrets
+              key: MYSQL_PASSWORD
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        readinessProbe:
+          exec:
+            command:
+            - mysqladmin
+            - ping
+            - -h
+            - "127.0.0.1"
+          initialDelaySeconds: 20
+          periodSeconds: 10
+          failureThreshold: 6
+        livenessProbe:
+          exec:
+            command:
+            - mysqladmin
+            - ping
+            - -h
+            - "127.0.0.1"
+          initialDelaySeconds: 30
+          periodSeconds: 20
+          failureThreshold: 3
+        volumeMounts:
+        - name: mysql-data
+          mountPath: /var/lib/mysql
+      volumes:
+      - name: mysql-data
+        persistentVolumeClaim:
+          claimName: mysql-pvc
+"@ | Out-File -FilePath "$env:USERPROFILE\k8s\mysql-deployment.yaml" -Encoding utf8
+
+# Apply the MySQL Deployment manifest
+kubectl apply -f "$env:USERPROFILE\k8s\mysql-deployment.yaml"
+
+# Verify pods are created after applying the deployment
+kubectl get pods
+
+# ================================================================================
+#  MYSQL SERVICE (ClusterIP — internal access only)
+# ================================================================================
+
+@"
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-service
+spec:
+  selector:
+    app: mysql
+  ports:
+    - port: 3306
+      targetPort: 3306
+      protocol: TCP
+  type: ClusterIP
+"@ | Out-File -FilePath "$env:USERPROFILE\k8s\mysql-service.yaml" -Encoding utf8
+
+kubectl apply -f "$env:USERPROFILE\k8s\mysql-service.yaml"
+
+# ================================================================================
+#  WORDPRESS DEPLOYMENT
+#  [FIX #1] volumeMount for /var/www/html added (uses wordpress-pvc)
+#  [FIX #2] livenessProbe added — restarts WordPress if it stops responding
+#  [FIX #3] resource limits added — prevents OOM kill by the kernel
+#  [FIX #5] readinessProbe initialDelaySeconds raised 10->30, failureThreshold
+#           added — prevents premature pod restarts during slow startup
+# ================================================================================
+
+@"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wordpress-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wordpress
+  template:
+    metadata:
+      labels:
+        app: wordpress
+    spec:
+      containers:
+      - name: wordpress
+        image: wordpress:latest
+        ports:
+        - containerPort: 80
+        env:
+        - name: WORDPRESS_DB_HOST
+          value: "mysql-service:3306"
+        - name: WORDPRESS_DB_NAME
+          value: wordpress
+        - name: WORDPRESS_DB_USER
+          value: wpuser
+        - name: WORDPRESS_DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secrets
+              key: MYSQL_PASSWORD
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        readinessProbe:
+          httpGet:
+            path: /wp-login.php
+            port: 80
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          failureThreshold: 6
+        livenessProbe:
+          httpGet:
+            path: /wp-login.php
+            port: 80
+          initialDelaySeconds: 60
+          periodSeconds: 20
+          failureThreshold: 3
+        volumeMounts:
+        - name: wordpress-data
+          mountPath: /var/www/html
+      volumes:
+      - name: wordpress-data
+        persistentVolumeClaim:
+          claimName: wordpress-pvc
+"@ | Out-File -FilePath "$env:USERPROFILE\k8s\wordpress-deployment.yaml" -Encoding utf8
+
+kubectl apply -f "$env:USERPROFILE\k8s\wordpress-deployment.yaml"
+
+# ================================================================================
+#  WORDPRESS SERVICE (NodePort — exposes WordPress on port 30080)
+# ================================================================================
+
+@"
+apiVersion: v1
+kind: Service
+metadata:
+  name: wordpress-service
+spec:
+  type: NodePort
+  selector:
+    app: wordpress
+  ports:
+    - port: 80
+      targetPort: 80
+      nodePort: 30080
+"@ | Out-File -FilePath "$env:USERPROFILE\k8s\wordpress-service.yaml" -Encoding utf8
+
+kubectl apply -f "$env:USERPROFILE\k8s\wordpress-service.yaml"
+
+# Apply all manifests at once (alternative to applying one by one above)
+kubectl apply -f "$env:USERPROFILE\k8s"
+
+# Apply manifests in the current directory (alternative)
+kubectl apply -f .
+
+# Enable Minikube ingress addon and wait for controller
+Write-Output "Enabling Minikube ingress addon (if not already enabled)..."
+minikube addons enable ingress
+
+Write-Output "Waiting for ingress controller pods to be ready..."
+kubectl wait --for=condition=available --timeout=120s deployment -n ingress-nginx --all 2>$null || Start-Sleep -Seconds 8
+
+# Show ingress pods
+kubectl get pods -n ingress-nginx -o wide
+
+# Wait for MySQL deployment to be available
+Write-Output "Waiting for MySQL deployment to be available..."
+kubectl wait --for=condition=available --timeout=180s deployment/mysql-deployment
+
+# Wait for WordPress deployment to be available
+Write-Output "Waiting for WordPress deployment to be available..."
+kubectl wait --for=condition=available --timeout=180s deployment/wordpress-deployment
+
+# Show status
+Write-Output "`n--- Pods (status) ---"
+kubectl get pods -o wide
+
+Write-Output "`n--- Services (status) ---"
+kubectl get svc -o wide
+
+Write-Output "`n--- PersistentVolumes / PVCs ---"
+kubectl get pv,pvc -o wide
+
+# ================================================================================
+#  [FIX #6] INGRESS — catch-all rule (no host: field)
+#  IP addresses are not valid Ingress hostnames. The host: field has been removed
+#  so the nginx ingress controller accepts all incoming requests regardless of
+#  the Host header. Access via http://<minikube-ip>/wp-admin works correctly.
+# ================================================================================
+
+$ingressPath = "$env:USERPROFILE\k8s\wordpress-ingress.yaml"
+
+@"
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: wordpress-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  rules:
+  - http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: wordpress-service
+            port:
+              number: 80
+"@ | Out-File -FilePath $ingressPath -Encoding utf8
+
+Write-Output "Applying ingress manifest (catch-all, no host restriction)..."
+kubectl apply -f $ingressPath
+
+Write-Output "Ingress applied. Describe ingress:"
+kubectl describe ingress wordpress-ingress
+
+# Show final resources
+Write-Output "`nFinal pods:"
+kubectl get pods -o wide
+
+Write-Output "`nFinal services:"
+kubectl get svc -o wide
+
+Write-Output "`nFinal ingress:"
+kubectl get ingress -o wide
+
+# ================================================================================
+#  OPEN WORDPRESS — tries multiple access methods in priority order
+# ================================================================================
+
+function Run-Trim([string]$cmd) {
+    $out = Invoke-Expression $cmd 2>$null
+    if ($null -eq $out) { return "" }
+    return ($out | Out-String).Trim()
+}
+
+$minikubeIP = Run-Trim "minikube ip"
+
+# 1) Try minikube service --url (returns a working tunnel/NodePort URL)
+$svcUrl = Run-Trim "minikube service --url wordpress-service"
+if ($svcUrl -ne "") {
+    $openUrl = "$svcUrl/wp-admin/"
+    Write-Output "Opening (minikube service --url): $openUrl"
+    Start-Process $openUrl
+    return
+}
+
+# 2) Try ingress catch-all (http://<minikube-ip>/wp-admin)
+if ($minikubeIP -ne "") {
+    $openUrl = "http://$minikubeIP/wp-admin/"
+    Write-Output "Opening (ingress catch-all): $openUrl"
+    Start-Process $openUrl
+    return
+}
+
+# 3) Fallback: minikube ip + NodePort
+if ($minikubeIP -ne "") {
+    $openUrl = "http://$minikubeIP`:30080/wp-admin/"
+    Write-Output "Opening (minikube ip + NodePort fallback): $openUrl"
+    Start-Process $openUrl
+    return
+}
+
+# 4) Final fallback: port-forward to localhost (keeps a new PowerShell window open)
+Write-Output "Falling back to kubectl port-forward on localhost:8080 (new window will remain open for forwarding)..."
+$pfCommand = "kubectl port-forward svc/wordpress-service 8080:80"
+Start-Process powershell -ArgumentList "-NoExit","-Command",$pfCommand
+Start-Sleep -Seconds 2
+$openUrl = "http://localhost:8080/wp-admin/"
+Write-Output "Opening (port-forward): $openUrl"
+Start-Process $openUrl
+
+# ================================================================================
+#  HELPFUL DEBUG COMMANDS (run individually as needed)
+# ================================================================================
+
+# 1) Check Minikube status
+# minikube status
+
+# 2) Show nodes and all pods across namespaces
+# kubectl get nodes
+# kubectl get po -A
+
+# 3) Describe a service to see endpoints and nodePort
+# kubectl describe svc wordpress-service
+
+# 4) View logs for MySQL and WordPress pods
+# kubectl logs -l app=mysql --tail=200
+# kubectl logs -l app=wordpress --tail=200
+
+# 5) Exec into a pod for interactive debugging (example: MySQL pod)
+# $mysqlPod = kubectl get pods -l app=mysql -o jsonpath="{.items[0].metadata.name}"
+# kubectl exec -it $mysqlPod -- bash
+
+# 6) If MySQL has leftover data and you want a fresh start, delete PVCs
+#    WARNING: this permanently deletes all stored database and WordPress data
+# kubectl get pvc
+# kubectl delete pvc mysql-pvc
+# kubectl delete pvc wordpress-pvc
+
+# 7) Delete and re-create WordPress PVC only (preserves MySQL data)
+# kubectl delete pvc wordpress-pvc
+# kubectl apply -f "$env:USERPROFILE\k8s\wordpress-pvc.yaml"
+
+# ================================================================================
+#  END OF SCRIPT
+#  If WordPress shows "Error establishing a database connection":
+#    kubectl logs -l app=mysql --tail=100
+#    kubectl describe pod -l app=mysql
+# ================================================================================

@@ -1,0 +1,5 @@
+# Force .tf files to be recognized as Terraform
+*.tf linguist-language=Terraform
+
+# Force .ps1 files to be recognized as PowerShell
+*.ps1 linguist-language=PowerShell

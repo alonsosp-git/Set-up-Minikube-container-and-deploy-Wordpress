@@ -1,14 +1,24 @@
 
 
-<# Automated script of: 
+Automated script of: 
 Understanding the Project Files: A Beginner's Guide to Kubernetes
 https://github.com/davbaster/wordpress-k8s-example
 
-Run the Script from PowerShell ISE
 ================================================================================
-  Create-wordpress-k8s-fixed.ps1
-  Full deployment script for MySQL + WordPress on Minikube (Windows)
-  with Persistent Storage, Ingress, Secrets, Probes, and Resource Limits.
+  BEFORE YOU RUN ANY SCRIPT
+================================================================================
+  Open PowerShell as Administrator and run this once:
+
+      Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+
+  Type Y and press Enter. You only need to do this once.
+================================================================================
+  SCRIPTS -- RUNNING THE SCRIPT
+================================================================================
+  .\Create-wordpress-k8s-fixed.ps1
+  
+ Full deployment script for MySQL + WordPress on Minikube (Windows)
+ with Persistent Storage, Ingress, Secrets, Probes, and Resource Limits.
 ================================================================================
 
 OVERVIEW
